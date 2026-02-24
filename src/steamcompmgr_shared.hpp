@@ -117,6 +117,13 @@ struct steamcompmgr_win_t {
 	bool isOverlay = false;
 	bool isExternalOverlay = false;
 
+	bool bIsSteamPid = false;
+	bool bIsSteamWebHelperPid = false;
+	bool bIsVRWebHelperPid = false;
+	bool bIsDolphin = false; // File Manager
+
+	std::string pid_name;
+
 	bool IsAnyOverlay() const
 	{
 		return isOverlay || isExternalOverlay;
@@ -233,7 +240,19 @@ struct steamcompmgr_win_t {
 		case gamescope::VirtualConnectorStrategies::SteamControlled:
 			return 0;
 		case gamescope::VirtualConnectorStrategies::PerAppId:
-			return static_cast<gamescope::VirtualConnectorKey_t>( this->appID );
+			if ( this->isSteamLegacyBigPicture )
+			{
+				// Steam Bootstrapper
+				return gamescope::k_ulSteamBootstrapperKey;
+			}
+			else if ( this->appID )
+			{
+				return static_cast<gamescope::VirtualConnectorKey_t>( this->appID );
+			}
+			else
+			{
+				return static_cast<gamescope::VirtualConnectorKey_t>( gamescope::k_ulNonSteamWindowBit | this->seq );	
+			}
 		case gamescope::VirtualConnectorStrategies::PerWindow:
 			return static_cast<gamescope::VirtualConnectorKey_t>( this->seq );
 		}

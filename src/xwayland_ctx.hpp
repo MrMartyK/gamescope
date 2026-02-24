@@ -94,6 +94,8 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
 
 	bool force_windows_fullscreen = false;
 
+	bool bTouchPointerEmulation = false;
+
 	std::vector< steamcompmgr_win_t* > GetPossibleFocusWindows();
 	void DetermineAndApplyFocus( const std::vector< steamcompmgr_win_t* > &vecPossibleFocusWindows );
 
@@ -243,12 +245,18 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
 		Atom gamescopeDisplayRefreshRateFeedback;
 		Atom gamescopeDisplayDynamicRefreshBasedOnGamePresence;
 
+		Atom gamescopeMainSteamVROverlay;
+		Atom steamosTouchPointerEmulation;
+
 		Atom wineHwndStyle;
 		Atom wineHwndStyleEx;
 
 		Atom clipboard;
 		Atom primarySelection;
 		Atom targets;
+
+		Atom wm_protocols;
+		Atom wm_delete_window;
 	} atoms;
 
 	bool HasQueuedEvents();

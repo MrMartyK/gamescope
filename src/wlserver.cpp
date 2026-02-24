@@ -597,6 +597,12 @@ static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 	}
 	surf->pending_presentation_feedbacks.clear();
 
+	if ( surf->pSyncobjSurface )
+	{
+		surf->pSyncobjSurface->Detach();
+		assert( surf->pSyncobjSurface == nullptr );
+	}
+
 	surf->wlr->data = nullptr;
 
 	for ( wl_resource *pSwapchain : surf->gamescope_swapchains )
@@ -1710,8 +1716,10 @@ void wlsession_close_kms()
 
 #endif
 
-gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display)
+gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, int nIndex)
 {
+	m_nIndex = nIndex;
+
 	struct wlr_xwayland_server_options xwayland_options = {
 		.lazy = false,
 		.enable_wm = false,
@@ -1734,8 +1742,16 @@ gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display)
 		refresh = g_nOutputRefresh;
 	}
 
+	int width = g_nNestedWidth;
+	int height = g_nNestedHeight;
+	if ( g_nXWaylandCount > 1 && nIndex == 0 )
+	{
+		width = g_nOutputWidth;
+		height = g_nOutputHeight;
+	}
+
 	wlr_output_state_set_enabled(output_state, true);
-	wlr_output_state_set_custom_mode(output_state, g_nNestedWidth, g_nNestedHeight, refresh);
+	wlr_output_state_set_custom_mode(output_state, width, height, refresh);
 	if (!wlr_output_commit_state(output, output_state))
 	{
 		wl_log.errorf("Failed to commit headless output");
@@ -2099,7 +2115,7 @@ bool wlserver_init( void ) {
 
 	for (int i = 0; i < g_nXWaylandCount; i++)
 	{
-		auto server = std::make_unique<gamescope_xwayland_server_t>(wlserver.display);
+		auto server = std::make_unique<gamescope_xwayland_server_t>(wlserver.display, i);
 		wlserver.wlr.xwayland_servers.emplace_back(std::move(server));
 	}
 
@@ -3196,7 +3212,7 @@ uint32_t wlserver_make_new_xwayland_server()
 {
 	assert( wlserver_is_lock_held() );
 
-	auto& server = wlserver.wlr.xwayland_servers.emplace_back(std::make_unique<gamescope_xwayland_server_t>(wlserver.display));
+	auto& server = wlserver.wlr.xwayland_servers.emplace_back(std::make_unique<gamescope_xwayland_server_t>(wlserver.display, (int)wlserver.wlr.xwayland_servers.size()));
 
 	while (!server->is_xwayland_ready()) {
 		wl_display_flush_clients(wlserver.display);

@@ -16,6 +16,7 @@
 #include <optional>
 #include <atomic>
 #include <variant>
+#include <any>
 
 struct wlr_buffer;
 struct wlr_dmabuf_attributes;
@@ -64,6 +65,16 @@ namespace gamescope
     static inline bool VirtualConnectorKeyIsSteam( VirtualConnectorKey_t ulKey )
     {
         return VirtualConnectorInSteamPerAppState() && ulKey == 769;
+    }
+
+    static constexpr uint64_t k_ulNonSteamWindowBit = ( uint64_t( 1 ) << 63u );
+    static constexpr uint64_t k_ulReservedBit = ( uint64_t( 1 ) << 62u );
+
+    static constexpr gamescope::VirtualConnectorKey_t k_ulSteamBootstrapperKey = ( uint64_t( 1 ) | k_ulReservedBit );
+
+    static inline bool VirtualConnectorKeyIsNonSteamWindow( VirtualConnectorKey_t ulKey )
+    {
+        return VirtualConnectorInSteamPerAppState() && ( ulKey & k_ulNonSteamWindowBit ) == k_ulNonSteamWindowBit;
     }
 
     static inline std::string_view VirtualConnectorStrategyToString( VirtualConnectorStrategy eStrategy )
@@ -155,6 +166,11 @@ namespace gamescope
         std::atomic<uint64_t> m_uCompletedPresents = { 0u };
     };
 
+    enum class ConnectorProperty
+    {
+        IsFileBrowser,
+    };
+
     class IBackendConnector
     {
     public:
@@ -191,6 +207,8 @@ namespace gamescope
         virtual uint64_t GetVirtualConnectorKey() const = 0;
 
         virtual INestedHints *GetNestedHints() = 0;
+
+        virtual void SetProperty( ConnectorProperty eProperty, std::any value ) = 0;
     };
 
     class CBaseBackendConnector : public IBackendConnector
@@ -216,6 +234,8 @@ namespace gamescope
         virtual BackendPresentFeedback& PresentationFeedback() override { return m_PresentFeedback; }
         virtual uint64_t GetVirtualConnectorKey() const override { return m_ulVirtualConnectorKey; }
         virtual INestedHints *GetNestedHints() override { return nullptr; }
+
+        virtual void SetProperty( ConnectorProperty eProperty, std::any value ) override { }
     protected:
         uint64_t m_ulConnectorId = 0;
         uint64_t m_ulVirtualConnectorKey = 0;
@@ -372,6 +392,8 @@ namespace gamescope
 
         virtual bool NewlyInitted() = 0;
 
+        virtual bool ShouldFitWindows() = 0;
+
         static IBackend *Get();
         template <typename T>
         static bool Set();
@@ -406,6 +428,8 @@ namespace gamescope
         virtual void ForwardFramebuffer( std::shared_ptr<IBackendPlane> &pPlane, IBackendFb *pFramebuffer, const void *pData ) override {}
 
         virtual bool NewlyInitted() override { return false; }
+
+        virtual bool ShouldFitWindows() override { return true; }
     };
 
     // This is a blob of data that may be associated with

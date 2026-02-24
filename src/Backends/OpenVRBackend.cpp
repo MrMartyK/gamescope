@@ -25,6 +25,7 @@
 #include <string.h>
 #include <thread>
 #include <mutex>
+#include <format>
 
 struct wlserver_input_method;
 
@@ -40,6 +41,8 @@ extern int g_nPreferredOutputHeight;
 extern bool g_bForceHDR10OutputDebug;
 extern bool g_bBorderlessOutputWindow;
 
+extern std::string *g_pVROverlayKey;
+
 extern gamescope::ConVar<bool> cv_composite_force;
 extern bool g_bColorSliderInUse;
 extern bool fadingOut;
@@ -52,6 +55,7 @@ extern bool g_bAllowDeferredBackend;
 
 void MakeFocusDirty();
 void update_connector_display_info_wl(struct drm_t *drm);
+void close_virtual_connector_key(gamescope::VirtualConnectorKey_t eKey);
 
 static LogScope openvr_log("openvr");
 
@@ -299,6 +303,16 @@ namespace gamescope
             return this;
         }
 
+        bool IsTouchForbidden() const { return m_bForbidTouchMode; }
+
+        virtual void SetProperty( ConnectorProperty eProperty, std::any value )
+        {
+            if ( eProperty == ConnectorProperty::IsFileBrowser )
+            {
+                m_bForbidTouchMode = std::any_cast<bool>( value );
+            }
+        }
+
         ///////////////////
         // INestedHints
         ///////////////////
@@ -374,6 +388,8 @@ namespace gamescope
         bool m_bWasVisible = false; // Event thread only
         std::atomic<bool> m_bOverlayShown = { false };
         std::atomic<bool> m_bSceneAppVisible = { false };
+
+        bool m_bForbidTouchMode = false;
     };
 
 	class COpenVRBackend final : public CBaseBackend
@@ -466,26 +482,6 @@ namespace gamescope
 			if ( g_nOutputWidth == 0 )
 				g_nOutputWidth = g_nOutputHeight * 16 / 9;
 
-            vr::EVRInitError error = vr::VRInitError_None;
-            VR_Init( &error, vr::VRApplication_Background );
-
-            if ( error != vr::VRInitError_None )
-            {
-                openvr_log.errorf("Unable to init VR runtime: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription( error ));
-                return false;
-            }
-
-			if ( !vulkan_init( vulkan_get_instance(), VK_NULL_HANDLE ) )
-			{
-				return false;
-			}
-
-			if ( !wlsession_init() )
-			{
-				fprintf( stderr, "Failed to initialize Wayland session\n" );
-				return false;
-			}
-
             // Reset getopt() state
             optind = 1;
 
@@ -499,6 +495,7 @@ namespace gamescope
                         opt_name = gamescope_options[opt_index].name;
                         if (strcmp(opt_name, "vr-overlay-key") == 0) {
                             m_szOverlayKey = optarg;
+                            g_pVROverlayKey = &m_szOverlayKey;
                         } else if (strcmp(opt_name, "vr-app-overlay-key") == 0) {
                             m_szAppOverlayKey = optarg;
                         } else if (strcmp(opt_name, "vr-overlay-explicit-name") == 0) {
@@ -549,6 +546,26 @@ namespace gamescope
                         assert(false); // unreachable
                 }
             }
+
+            vr::EVRInitError error = vr::VRInitError_None;
+            VR_Init( &error, vr::VRApplication_Background );
+
+            if ( error != vr::VRInitError_None )
+            {
+                openvr_log.errorf("Unable to init VR runtime: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription( error ));
+                return false;
+            }
+
+			if ( !vulkan_init( vulkan_get_instance(), VK_NULL_HANDLE ) )
+			{
+				return false;
+			}
+
+			if ( !wlsession_init() )
+			{
+				fprintf( stderr, "Failed to initialize Wayland session\n" );
+				return false;
+			}
 
             if ( !m_pchOverlayName )
                 m_pchOverlayName = "Gamescope";
@@ -858,6 +875,16 @@ namespace gamescope
                 return TouchClickModes::Trackpad;
             }
 
+            if ( pConnector->IsTouchForbidden() )
+            {
+                return TouchClickModes::Left;
+            }
+
+            if ( VirtualConnectorKeyIsNonSteamWindow( pConnector->GetVirtualConnectorKey() ) )
+            {
+                return TouchClickModes::Passthrough;
+            }
+
             if ( VirtualConnectorInSteamPerAppState() )
             {
                 if ( !VirtualConnectorKeyIsSteam( pConnector->GetVirtualConnectorKey() ) )
@@ -945,6 +972,11 @@ namespace gamescope
                     m_pForwarderPlanesInFlight.emplace_back( std::move( pOpenVRPlane ) );
                 }
             }
+        }
+
+        bool ShouldFitWindows() override
+        {
+            return false;
         }
 
         vr::IVRIPCResourceManagerClient *GetIPCResourceManager()
@@ -1057,8 +1089,7 @@ namespace gamescope
                     }
                     else
                     {
-                        // How do we quit a game?
-                        // Do we?
+                        close_virtual_connector_key( pConnector->GetVirtualConnectorKey() );
                     }
                     break;
                 }
@@ -1108,7 +1139,46 @@ namespace gamescope
                 {
                     if (m_pIME)
                     {
-                        type_text(m_pIME, vrEvent.data.keyboard.cNewInput);
+                        const char *pchText = vrEvent.data.keyboard.cNewInput;
+                        size_t unStrLen = strlen( pchText );
+                        bool bEscaped = false;
+                        if ( unStrLen > 2 && pchText[0] == '\x1b' && pchText[1] == '[' )
+                        {
+                            bEscaped = true;
+                        }
+
+                        if ( bEscaped )
+                        {
+                            const char chControlChar = pchText[2];
+                            gamescope_input_method_action eAction = GAMESCOPE_INPUT_METHOD_ACTION_NONE;
+                            switch (chControlChar)
+                            {
+                                case 'D': eAction = GAMESCOPE_INPUT_METHOD_ACTION_MOVE_LEFT; break;
+                                case 'C': eAction = GAMESCOPE_INPUT_METHOD_ACTION_MOVE_RIGHT; break;
+                                case 'A': eAction = GAMESCOPE_INPUT_METHOD_ACTION_MOVE_UP; break;
+                                case 'B': eAction = GAMESCOPE_INPUT_METHOD_ACTION_MOVE_DOWN; break;
+                            }
+
+                            if ( eAction != GAMESCOPE_INPUT_METHOD_ACTION_NONE )
+                            {
+                                perform_action( m_pIME, eAction );
+                            }
+                        }
+                        else
+                        {
+                            if ( unStrLen == 1 && pchText[0] == '\n' )
+                            {
+                                perform_action( m_pIME, GAMESCOPE_INPUT_METHOD_ACTION_SUBMIT );
+                            }
+                            else if ( unStrLen == 1 && pchText[0] == '\b' )
+                            {
+                                perform_action( m_pIME, GAMESCOPE_INPUT_METHOD_ACTION_DELETE_LEFT );
+                            }
+                            else
+                            {
+                                type_text( m_pIME, pchText );
+                            }
+                        }
                     }
                     break;
                 }
@@ -1219,11 +1289,23 @@ namespace gamescope
                             }
                             else
                             {
+                                bool bDown = vrEvent.eventType == vr::VREvent_MouseButtonDown;
                                 wlserver_lock();
-                                if (vrEvent.eventType == vr::VREvent_MouseButtonDown)
-                                    wlserver_touchdown(flX, flY, 0, ++m_uFakeTimestamp);
-                                else
-                                    wlserver_touchup(0, ++m_uFakeTimestamp);
+                                if (vrEvent.data.mouse.button == vr::VRMouseButton_Left)
+                                {
+                                    if (bDown)
+                                        wlserver_touchdown(flX, flY, 0, ++m_uFakeTimestamp);
+                                    else
+                                        wlserver_touchup(0, ++m_uFakeTimestamp);
+                                }
+                                else if (vrEvent.data.mouse.button == vr::VRMouseButton_Right)
+                                {
+                                    wlserver_mousebutton(BTN_RIGHT, bDown, ++m_uFakeTimestamp);
+                                }
+                                else if (vrEvent.data.mouse.button == vr::VRMouseButton_Middle)
+                                {
+                                    wlserver_mousebutton(BTN_MIDDLE, bDown, ++m_uFakeTimestamp);
+                                }
                                 wlserver_unlock();
                             }
                         }
@@ -1503,6 +1585,11 @@ namespace gamescope
 
         bNeedsFullComposite |= !!(g_uCompositeDebug & CompositeDebugFlag::Heatmap);
 
+        // Non-Steam windows NEVER use composition!
+        bool bExplicitNonSteam = VirtualConnectorKeyIsNonSteamWindow( GetVirtualConnectorKey() );
+        if ( bExplicitNonSteam )
+            bNeedsFullComposite = false;
+
         if ( !bNeedsFullComposite )
         {
             bool bNeedsBacking = true;
@@ -1567,6 +1654,10 @@ namespace gamescope
         GetVBlankTimer().UpdateWasCompositing( true );
         GetVBlankTimer().UpdateLastDrawTime( get_time_in_nanos() - g_SteamCompMgrVBlankTime.ulWakeupTime );
 
+        int32_t nNewRefreshRate = (int32_t) ConvertHztomHz( roundf( vr::VRSystem()->GetFloatTrackedDeviceProperty( vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_DisplayFrequency_Float ) ) );
+        if ( g_nOutputRefresh != nNewRefreshRate )
+            g_nOutputRefresh = nNewRefreshRate;
+
         m_pBackend->PollState();
 
         return 0;
@@ -1601,6 +1692,8 @@ namespace gamescope
     }
     void COpenVRConnector::SetIcon( std::shared_ptr<std::vector<uint32_t>> uIconPixels )
     {
+        bool bExplicitNonSteam = VirtualConnectorKeyIsNonSteamWindow( GetVirtualConnectorKey() );
+
         if ( cv_vr_use_window_icons && uIconPixels && uIconPixels->size() >= 3 )
         {
             const uint32_t uWidth = (*uIconPixels)[0];
@@ -1620,7 +1713,7 @@ namespace gamescope
 
             vr::VROverlay()->SetOverlayRaw( GetPrimaryPlane()->GetOverlayThumbnail(), &(*uIconPixels)[2], uWidth, uHeight, sizeof(uint32_t) );
         }
-        else if ( m_pBackend->GetOverlayIcon() )
+        else if ( m_pBackend->GetOverlayIcon() && !bExplicitNonSteam )
         {
             vr::VROverlay()->SetOverlayFromFile( GetPrimaryPlane()->GetOverlayThumbnail(), m_pBackend->GetOverlayIcon() );
         }
@@ -1744,6 +1837,8 @@ namespace gamescope
 
         std::string sOverlayKey = m_pBackend->GetOverlayKey();
 
+        bool bExplicitNonSteam = false;
+
         VirtualConnectorStrategy eStrategy = cv_backend_virtual_connector_strategy;
         if ( !VirtualConnectorStrategyIsSingleOutput( eStrategy ) )
         {
@@ -1751,17 +1846,32 @@ namespace gamescope
             bool bIsSteam = VirtualConnectorKeyIsSteam( ulKey );
             if ( !bIsSteam )
             {
-                const char *pszAppOverlayKey = m_pBackend->GetAppOverlayKey();
-                if ( pszAppOverlayKey && *pszAppOverlayKey )
+                if ( ulKey == k_ulSteamBootstrapperKey )
                 {
-                    sOverlayKey = pszAppOverlayKey;
-                    sOverlayKey += ".";
+                    sOverlayKey = "valve.steam.gamepadui.bootstrapper";
                 }
                 else
                 {
-                    sOverlayKey += ".app.";
+                    bExplicitNonSteam = VirtualConnectorKeyIsNonSteamWindow( ulKey );
+                    if ( bExplicitNonSteam )
+                    {
+                        sOverlayKey = std::format( "gamescope.{}.window.{}", wlserver_get_wl_display_name(), ulKey & ~gamescope::k_ulNonSteamWindowBit );
+                    }
+                    else
+                    {
+                        const char *pszAppOverlayKey = m_pBackend->GetAppOverlayKey();
+                        if ( pszAppOverlayKey && *pszAppOverlayKey )
+                        {
+                            sOverlayKey = pszAppOverlayKey;
+                            sOverlayKey += ".";
+                        }
+                        else
+                        {
+                            sOverlayKey += ".app.";
+                        }
+                        sOverlayKey += std::to_string( m_pConnector->GetVirtualConnectorKey() );
+                    }
                 }
-                sOverlayKey += std::to_string( m_pConnector->GetVirtualConnectorKey() );
             }
         }
 
@@ -1775,9 +1885,9 @@ namespace gamescope
                 m_pBackend->GetOverlayName(),
                 &m_hOverlay, &m_hOverlayThumbnail );
 
-            vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableControlBar,		  m_pBackend->ShouldEnableControlBar() );
-            vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableControlBarKeyboard, m_pBackend->ShouldEnableControlBarKeyboard() );
-            vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableControlBarClose,	  m_pBackend->ShouldEnableControlBarClose() );
+            vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableControlBar,		  m_pBackend->ShouldEnableControlBar() || bExplicitNonSteam );
+            vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableControlBarKeyboard, m_pBackend->ShouldEnableControlBarKeyboard() || bExplicitNonSteam );
+            vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_EnableControlBarClose,	  m_pBackend->ShouldEnableControlBarClose() || bExplicitNonSteam );
             vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_WantsModalBehavior,	      m_pBackend->IsModal() );
             vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_SendVRSmoothScrollEvents, true );
             vr::VROverlay()->SetOverlayFlag( m_hOverlay, vr::VROverlayFlags_VisibleInDashboard,       false );
@@ -1787,7 +1897,7 @@ namespace gamescope
             vr::VROverlay()->SetOverlayCurvature	( m_hOverlay,  m_pBackend->GetPhysicalCurvature() );
             vr::VROverlay()->SetOverlayPreCurvePitch( m_hOverlay,  m_pBackend->GetPhysicalPreCurvePitch() );
 
-            if ( m_pBackend->GetOverlayIcon() )
+            if ( m_pBackend->GetOverlayIcon() && !bExplicitNonSteam )
             {
                 vr::EVROverlayError err = vr::VROverlay()->SetOverlayFromFile( m_hOverlayThumbnail, m_pBackend->GetOverlayIcon() );
                 if( err != vr::VROverlayError_None )

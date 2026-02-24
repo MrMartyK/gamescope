@@ -713,6 +713,23 @@ static gamescope::CDRMPlane *find_primary_plane(struct drm_t *drm)
 	return nullptr;
 }
 
+static bool have_overlay_planes(struct drm_t *drm)
+{
+	if ( !drm->pCRTC )
+		return false;
+
+	for ( std::unique_ptr< gamescope::CDRMPlane > &pPlane : drm->planes )
+	{
+		if ( pPlane->GetModePlane()->possible_crtcs & drm->pCRTC->GetCRTCMask() )
+		{
+			if ( pPlane->GetProperties().type->GetCurrentValue() == DRM_PLANE_TYPE_OVERLAY )
+				return true;
+		}
+	}
+
+	return false;
+}
+
 extern void mangoapp_output_update( uint64_t vblanktime );
 static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, unsigned int crtc_id, void *data)
 {
@@ -1333,16 +1350,32 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
 		}
 	}
 
-	// ARGB8888 is the Xformat and AFormat here in this function as we want transparent overlay
-	g_nDRMFormatOverlay = pick_plane_format(&drm->primary_formats, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB2101010);
-	if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
-		g_nDRMFormatOverlay = pick_plane_format(&drm->primary_formats, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR2101010);
+	if (have_overlay_planes(drm)) {
+		// ARGB8888 is the Xformat and AFormat here in this function as we want transparent overlay
+		g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB2101010);
 		if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
-			g_nDRMFormatOverlay = pick_plane_format(&drm->primary_formats, DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB8888);
+			g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR2101010);
 			if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
-				drm_log.errorf("Overlay plane doesn't support any formats >= 8888");
-				return false;
+				g_nDRMFormatOverlay = pick_plane_format(&drm->formats, DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB8888);
+				if ( g_nDRMFormatOverlay == DRM_FORMAT_INVALID ) {
+					drm_log.errorf("Overlay plane doesn't support any formats >= 8888");
+					return false;
+				}
 			}
+		}
+	} else {
+		switch (g_nDRMFormat) {
+		case DRM_FORMAT_XRGB2101010:
+			g_nDRMFormatOverlay = DRM_FORMAT_ARGB2101010;
+			break;
+		case DRM_FORMAT_ABGR2101010:
+			g_nDRMFormatOverlay = DRM_FORMAT_ABGR2101010;
+			break;
+		case DRM_FORMAT_XRGB8888:
+			g_nDRMFormatOverlay = DRM_FORMAT_ARGB8888;
+			break;
+		default:
+			return false;
 		}
 	}
 
@@ -2450,37 +2483,40 @@ namespace gamescope
 					pHDRStaticMetadata->desired_content_min_luminance
 					? nits_to_u16_dark( pHDRStaticMetadata->desired_content_min_luminance )
 					: nits_to_u16_dark( 0.0f );
-
-				// Generate a default HDR10 infoframe.
-				hdr_output_metadata defaultHDRMetadata{};
-				hdr_metadata_infoframe *pInfoframe = &defaultHDRMetadata.hdmi_metadata_type1;
-
-				// To be filled in by the app based on the scene, default to desired_content_max_luminance
-				//
-		 		// Using display's max_fall for the default metadata max_cll to avoid displays
-		 		// overcompensating with tonemapping for SDR content.
-				uint16_t uDefaultInfoframeLuminances = m_Mutable.HDR.uMaxFrameAverageLuminance;
-
-				pInfoframe->display_primaries[0].x = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.r.x );
-				pInfoframe->display_primaries[0].y = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.r.y );
-				pInfoframe->display_primaries[1].x = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.g.x );
-				pInfoframe->display_primaries[1].y = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.g.y );
-				pInfoframe->display_primaries[2].x = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.b.x );
-				pInfoframe->display_primaries[2].y = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.b.y );
-				pInfoframe->white_point.x = color_xy_to_u16( m_Mutable.DisplayColorimetry.white.x );
-				pInfoframe->white_point.y = color_xy_to_u16( m_Mutable.DisplayColorimetry.white.y );
-				pInfoframe->max_display_mastering_luminance = uDefaultInfoframeLuminances;
-				pInfoframe->min_display_mastering_luminance = m_Mutable.HDR.uMinContentLightLevel;
-				pInfoframe->max_cll = uDefaultInfoframeLuminances;
-				pInfoframe->max_fall = uDefaultInfoframeLuminances;
-				pInfoframe->eotf = HDMI_EOTF_ST2084;
-
-				m_Mutable.HDR.pDefaultMetadataBlob = GetBackend()->CreateBackendBlob( defaultHDRMetadata );
 			}
 			else
 			{
 				m_Mutable.HDR.bExposeHDRSupport = false;
 			}
+		}
+
+		// Generate a default HDR10 infoframe.
+		if ( m_Mutable.HDR.IsHDR10() )
+		{
+			hdr_output_metadata defaultHDRMetadata{};
+			hdr_metadata_infoframe *pInfoframe = &defaultHDRMetadata.hdmi_metadata_type1;
+
+			// To be filled in by the app based on the scene, default to desired_content_max_luminance
+			//
+			// Using display's max_fall for the default metadata max_cll to avoid displays
+			// overcompensating with tonemapping for SDR content.
+			uint16_t uDefaultInfoframeLuminances = m_Mutable.HDR.uMaxFrameAverageLuminance;
+
+			pInfoframe->display_primaries[0].x = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.r.x );
+			pInfoframe->display_primaries[0].y = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.r.y );
+			pInfoframe->display_primaries[1].x = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.g.x );
+			pInfoframe->display_primaries[1].y = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.g.y );
+			pInfoframe->display_primaries[2].x = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.b.x );
+			pInfoframe->display_primaries[2].y = color_xy_to_u16( m_Mutable.DisplayColorimetry.primaries.b.y );
+			pInfoframe->white_point.x = color_xy_to_u16( m_Mutable.DisplayColorimetry.white.x );
+			pInfoframe->white_point.y = color_xy_to_u16( m_Mutable.DisplayColorimetry.white.y );
+			pInfoframe->max_display_mastering_luminance = uDefaultInfoframeLuminances;
+			pInfoframe->min_display_mastering_luminance = m_Mutable.HDR.uMinContentLightLevel;
+			pInfoframe->max_cll = uDefaultInfoframeLuminances;
+			pInfoframe->max_fall = uDefaultInfoframeLuminances;
+			pInfoframe->eotf = HDMI_EOTF_ST2084;
+
+			m_Mutable.HDR.pDefaultMetadataBlob = GetBackend()->CreateBackendBlob( defaultHDRMetadata );
 		}
 	}
 
@@ -2525,7 +2561,7 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 		if ( i < frameInfo->layerCount )
 		{
 			const FrameInfo_t::Layer_t *pLayer = &frameInfo->layers[ i ];
-			gamescope::CDRMFb *pDrmFb = static_cast<gamescope::CDRMFb *>( pLayer->tex ? pLayer->tex->GetBackendFb()->Unwrap() : nullptr );
+			gamescope::CDRMFb *pDrmFb = static_cast<gamescope::CDRMFb *>( (pLayer->tex && pLayer->tex->GetBackendFb()) ? pLayer->tex->GetBackendFb()->Unwrap() : nullptr );
 
 			if ( pDrmFb == nullptr )
 			{
@@ -2677,6 +2713,7 @@ drm_prepare_liftoff( struct drm_t *drm, const struct FrameInfo_t *frameInfo, boo
 
 			liftoff_layer_unset_property( drm->lo_layers[ i ], "COLOR_ENCODING" );
 			liftoff_layer_unset_property( drm->lo_layers[ i ], "COLOR_RANGE" );
+			liftoff_layer_unset_property( drm->lo_layers[ i ], "pixel blend mode" );
 
 			if ( drm_supports_color_mgmt( drm ) )
 			{
@@ -3461,7 +3498,7 @@ namespace gamescope
 			if ( !bDoComposite )
 			{
 				// Scanout + Planes Path
-				m_bWasPartialCompsiting = false;
+				m_bWasPartialCompositing = false;
 				m_bWasCompositing = false;
 				if ( pFrameInfo->layerCount == 2 )
 					m_nLastSingleOverlayZPos = pFrameInfo->layers[1].zpos;
@@ -3512,7 +3549,7 @@ namespace gamescope
 			// We were already stalling for the full composition before, so it's not an issue
 			// for latency, we just need to make sure we get 1 partial frame that isn't deferred
 			// in time so we don't lose layers.
-			bool bDefer = !bNeedsFullComposite && ( !m_bWasCompositing || m_bWasPartialCompsiting );
+			bool bDefer = !bNeedsFullComposite && ( !m_bWasCompositing || m_bWasPartialCompositing );
 
 			// If doing a partial composition then remove the baseplane
 			// from our frameinfo to composite.
@@ -3571,11 +3608,11 @@ namespace gamescope
 				baseLayer->ctm = nullptr;
 				baseLayer->colorspace = pFrameInfo->outputEncodingEOTF == EOTF_PQ ? GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ : GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB;
 
-				m_bWasPartialCompsiting = false;
+				m_bWasPartialCompositing = false;
 			}
 			else
 			{
-				if ( m_bWasPartialCompsiting || !bDefer )
+				if ( m_bWasPartialCompositing || !bDefer )
 				{
 					presentCompFrameInfo.applyOutputColorMgmt = g_ColorMgmt.pending.enabled;
 					presentCompFrameInfo.layerCount = 2;
@@ -3628,7 +3665,7 @@ namespace gamescope
 					}
 				}
 
-				m_bWasPartialCompsiting = true;
+				m_bWasPartialCompositing = true;
 			}
 
 			int ret = drm_prepare( &g_DRM, bAsync, &presentCompFrameInfo );
@@ -3831,7 +3868,7 @@ namespace gamescope
 
 	private:
 		bool m_bWasCompositing = false;
-		bool m_bWasPartialCompsiting = false;
+		bool m_bWasPartialCompositing = false;
 		int m_nLastSingleOverlayZPos = 0;
 
 		uint32_t m_uNextPresentCtx = 0;
