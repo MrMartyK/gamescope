@@ -65,4 +65,6 @@ void main() {
 
     if (checkDebugFlag(compositedebug_Markers))
         compositing_debug(coord);
+
+    itm_debug_indicator(coord);
 }

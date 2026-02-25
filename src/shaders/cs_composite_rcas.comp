@@ -93,6 +93,8 @@ void rcasComposite(uvec2 pos)
 
     if (checkDebugFlag(compositedebug_Markers))
         compositing_debug(pos);
+
+    itm_debug_indicator(pos);
 }
 
 void main()

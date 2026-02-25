@@ -70,6 +70,34 @@ void compositing_debug(uvec2 coord) {
     }
 }
 
+// Debug indicator for ITM (inverse tone mapping) state.
+// Draws a small box in the top-right corner:
+//   Green = ITM active, Red = ITM inactive
+void itm_debug_indicator(uvec2 coord) {
+    uvec2 outSize = imageSize(dst);
+    // 48x48 box, 8px from the top-right edge
+    uint boxSize = 48u;
+    uint margin = 8u;
+    uint bx = outSize.x - margin - boxSize;
+    uint by = margin;
+
+    if (coord.x >= bx && coord.x < bx + boxSize &&
+        coord.y >= by && coord.y < by + boxSize) {
+        // Border (2px): white
+        bool border = coord.x < bx + 2u || coord.x >= bx + boxSize - 2u ||
+                      coord.y < by + 2u || coord.y >= by + boxSize - 2u;
+        vec4 color;
+        if (border) {
+            color = vec4(1.0f, 1.0f, 1.0f, 1.0f);
+        } else if (c_itm_enable) {
+            color = vec4(0.0f, 1.0f, 0.0f, 1.0f); // green = ITM on
+        } else {
+            color = vec4(1.0f, 0.0f, 0.0f, 1.0f); // red = ITM off
+        }
+        imageStore(dst, ivec2(coord), color);
+    }
+}
+
 // Takes in a scRGB/Linear encoded value and applies color management
 // based on the input colorspace.
 //
