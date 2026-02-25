@@ -70,31 +70,210 @@ void compositing_debug(uvec2 coord) {
     }
 }
 
-// Debug indicator for ITM (inverse tone mapping) state.
-// Draws a small box in the top-right corner:
-//   Green = ITM active, Red = ITM inactive
+// ---- ITM Debug Overlay ----
+// Persistent on-screen panel showing live ITM status and stats.
+// Renders a 3x5 bitmap font at 3x scale for readability.
+//
+// Each glyph is 3 columns x 5 rows = 15 bits.
+// Packed as: row0(bits 14..12) row1(11..9) row2(8..6) row3(5..3) row4(2..0)
+// MSB of each 3-bit group = leftmost column.
+//
+//  Glyph grid example for '0':
+//   ###    row0 = 111 = 7
+//   # #    row1 = 101 = 5
+//   # #    row2 = 101 = 5
+//   # #    row3 = 101 = 5
+//   ###    row4 = 111 = 7
+// Helper macro: G(r0,r1,r2,r3,r4) = (r0<<12)|(r1<<9)|(r2<<6)|(r3<<3)|r4
+
+#define GLYPH(r0,r1,r2,r3,r4) ((uint(r0)<<12)|(uint(r1)<<9)|(uint(r2)<<6)|(uint(r3)<<3)|uint(r4))
+
+uint font_glyph(uint ch) {
+    //          row0 row1 row2 row3 row4
+    if (ch == 0u)  return GLYPH(7, 5, 5, 5, 7); // 0:  ### / # # / # # / # # / ###
+    if (ch == 1u)  return GLYPH(2, 6, 2, 2, 7); // 1:   #  / ##  /  #  /  #  / ###
+    if (ch == 2u)  return GLYPH(7, 1, 7, 4, 7); // 2:  ### /   # / ### / #   / ###
+    if (ch == 3u)  return GLYPH(7, 1, 7, 1, 7); // 3:  ### /   # / ### /   # / ###
+    if (ch == 4u)  return GLYPH(5, 5, 7, 1, 1); // 4:  # # / # # / ### /   # /   #
+    if (ch == 5u)  return GLYPH(7, 4, 7, 1, 7); // 5:  ### / #   / ### /   # / ###
+    if (ch == 6u)  return GLYPH(7, 4, 7, 5, 7); // 6:  ### / #   / ### / # # / ###
+    if (ch == 7u)  return GLYPH(7, 1, 1, 1, 1); // 7:  ### /   # /   # /   # /   #
+    if (ch == 8u)  return GLYPH(7, 5, 7, 5, 7); // 8:  ### / # # / ### / # # / ###
+    if (ch == 9u)  return GLYPH(7, 5, 7, 1, 7); // 9:  ### / # # / ### /   # / ###
+
+    // Letters (10+)
+    if (ch == 10u) return GLYPH(2, 5, 7, 5, 5); // A:   #  / # # / ### / # # / # #
+    if (ch == 11u) return GLYPH(7, 5, 7, 4, 7); // D:  ### / # # / ### / #   / ### -- crude D
+    if (ch == 12u) return GLYPH(7, 4, 7, 4, 7); // E:  ### / #   / ### / #   / ###
+    if (ch == 13u) return GLYPH(7, 4, 7, 4, 4); // F:  ### / #   / ### / #   / #
+    if (ch == 14u) return GLYPH(7, 4, 5, 5, 7); // G:  ### / #   / # # / # # / ###
+    if (ch == 15u) return GLYPH(5, 5, 7, 5, 5); // H:  # # / # # / ### / # # / # #
+    if (ch == 16u) return GLYPH(7, 2, 2, 2, 7); // I:  ### /  #  /  #  /  #  / ###
+    if (ch == 17u) return GLYPH(4, 4, 4, 4, 7); // L:  #   / #   / #   / #   / ###
+    if (ch == 18u) return GLYPH(5, 7, 5, 5, 5); // M:  # # / ### / # # / # # / # #
+    if (ch == 19u) return GLYPH(6, 5, 5, 5, 5); // N:  ##  / # # / # # / # # / # #
+    if (ch == 20u) return GLYPH(7, 5, 5, 5, 7); // O:  ### / # # / # # / # # / ###
+    if (ch == 21u) return GLYPH(7, 5, 7, 4, 4); // P:  ### / # # / ### / #   / #
+    if (ch == 22u) return GLYPH(7, 5, 7, 1, 1); // Q:  ### / # # / ### /   # /   # -- crude
+    if (ch == 23u) return GLYPH(7, 5, 7, 6, 5); // R:  ### / # # / ### / ##  / # #
+    if (ch == 24u) return GLYPH(7, 4, 7, 1, 7); // S:  ### / #   / ### /   # / ###  (= 5)
+    if (ch == 25u) return GLYPH(7, 2, 2, 2, 2); // T:  ### /  #  /  #  /  #  /  #
+    if (ch == 26u) return GLYPH(5, 5, 5, 5, 7); // U:  # # / # # / # # / # # / ###
+    if (ch == 27u) return GLYPH(0, 0, 7, 0, 0); // -:  (dash, middle row)
+    if (ch == 28u) return 0u;                     // (space)
+    return 0u;
+}
+
+bool font_pixel(uint ch, uint lx, uint ly) {
+    uint glyph = font_glyph(ch);
+    uint row = ly / 3u;  // 0..4  (3x scale vertically)
+    uint col = lx / 3u;  // 0..2  (3x scale horizontally)
+    if (row > 4u || col > 2u) return false;
+    uint bit = (4u - row) * 3u + (2u - col);
+    return (glyph & (1u << bit)) != 0u;
+}
+
+// Character constants
+const uint CH_0 = 0u;  const uint CH_1 = 1u;  const uint CH_2 = 2u;
+const uint CH_3 = 3u;  const uint CH_4 = 4u;  const uint CH_5 = 5u;
+const uint CH_6 = 6u;  const uint CH_7 = 7u;  const uint CH_8 = 8u;
+const uint CH_9 = 9u;
+const uint CH_A = 10u; const uint CH_D = 11u; const uint CH_E = 12u;
+const uint CH_F = 13u; const uint CH_G = 14u; const uint CH_H = 15u;
+const uint CH_I = 16u; const uint CH_L = 17u; const uint CH_M = 18u;
+const uint CH_N = 19u; const uint CH_O = 20u; const uint CH_P = 21u;
+const uint CH_Q = 22u; const uint CH_R = 23u; const uint CH_S = 24u;
+const uint CH_T = 25u; const uint CH_U = 26u;
+const uint CH_DASH = 27u; const uint CH_SPC = 28u;
+
+uint digit_char(uint value, uint pos, uint total_digits) {
+    uint divisor = 1u;
+    for (uint i = 0u; i < (total_digits - 1u - pos); i++)
+        divisor *= 10u;
+    return (value / divisor) % 10u;
+}
+
 void itm_debug_indicator(uvec2 coord) {
     uvec2 outSize = imageSize(dst);
-    // 48x48 box, 8px from the top-right edge
-    uint boxSize = 48u;
-    uint margin = 8u;
-    uint bx = outSize.x - margin - boxSize;
-    uint by = margin;
 
-    if (coord.x >= bx && coord.x < bx + boxSize &&
-        coord.y >= by && coord.y < by + boxSize) {
-        // Border (2px): white
-        bool border = coord.x < bx + 2u || coord.x >= bx + boxSize - 2u ||
-                      coord.y < by + 2u || coord.y >= by + boxSize - 2u;
-        vec4 color;
-        if (border) {
-            color = vec4(1.0f, 1.0f, 1.0f, 1.0f);
-        } else if (c_itm_enable) {
-            color = vec4(0.0f, 1.0f, 0.0f, 1.0f); // green = ITM on
+    // Each glyph: 3px * 3x scale = 9px wide, 5px * 3x scale = 15px tall
+    const uint GLYPH_W  = 9u;   // 3 cols * 3x
+    const uint GLYPH_H  = 15u;  // 5 rows * 3x
+    const uint GLYPH_GAP = 3u;  // 3px gap between glyphs
+    const uint CELL_W   = GLYPH_W + GLYPH_GAP; // 12px per character cell
+    const uint LINE_H   = GLYPH_H + 4u;        // 19px per line (15 + 4 spacing)
+    const uint MAX_COLS  = 10u;
+    const uint NUM_LINES = 5u;
+    const uint PAD       = 8u;
+
+    uint panelW = MAX_COLS * CELL_W + PAD * 2u;
+    uint panelH = NUM_LINES * LINE_H + PAD * 2u;
+    uint margin = 12u;
+
+    uint px = outSize.x - margin - panelW;
+    uint py = margin;
+
+    if (coord.x < px || coord.x >= px + panelW ||
+        coord.y < py || coord.y >= py + panelH)
+        return;
+
+    uint lx = coord.x - px;
+    uint ly = coord.y - py;
+
+    vec4 bgColor = vec4(0.05f, 0.05f, 0.05f, 1.0f);
+
+    // Border (2px)
+    if (lx < 2u || lx >= panelW - 2u || ly < 2u || ly >= panelH - 2u) {
+        vec4 borderColor = c_itm_enable
+            ? vec4(0.1f, 0.7f, 0.1f, 1.0f)
+            : vec4(0.5f, 0.15f, 0.15f, 1.0f);
+        imageStore(dst, ivec2(coord), borderColor);
+        return;
+    }
+
+    // Content area
+    uint cx = lx - PAD;
+    uint cy = ly - PAD;
+    if (lx < PAD || ly < PAD) {
+        imageStore(dst, ivec2(coord), bgColor);
+        return;
+    }
+
+    uint row = cy / LINE_H;
+    uint rowY = cy % LINE_H;
+    uint col = cx / CELL_W;
+    uint colX = cx % CELL_W;
+
+    if (rowY >= GLYPH_H || row >= NUM_LINES || col >= MAX_COLS || cx >= MAX_COLS * CELL_W) {
+        imageStore(dst, ivec2(coord), bgColor);
+        return;
+    }
+
+    // In the gap between glyphs
+    if (colX >= GLYPH_W) {
+        imageStore(dst, ivec2(coord), bgColor);
+        return;
+    }
+
+    uint ch = CH_SPC;
+    vec4 textColor = vec4(0.9f, 0.9f, 0.9f, 1.0f);
+
+    // Line 0: "ITM ON" or "ITM OFF"
+    if (row == 0u) {
+        if (c_itm_enable) {
+            // I T M   O N
+            const uint line0[10] = uint[10](CH_I, CH_T, CH_M, CH_SPC, CH_O, CH_N, CH_SPC, CH_SPC, CH_SPC, CH_SPC);
+            ch = line0[col];
+            textColor = vec4(0.2f, 1.0f, 0.3f, 1.0f);
         } else {
-            color = vec4(1.0f, 0.0f, 0.0f, 1.0f); // red = ITM off
+            const uint line0[10] = uint[10](CH_I, CH_T, CH_M, CH_SPC, CH_O, CH_F, CH_F, CH_SPC, CH_SPC, CH_SPC);
+            ch = line0[col];
+            textColor = vec4(1.0f, 0.3f, 0.3f, 1.0f);
         }
-        imageStore(dst, ivec2(coord), color);
+    }
+    // Line 1: "SDR <nnn>"  (u_itmSdrNits)
+    else if (row == 1u) {
+        textColor = vec4(0.6f, 0.85f, 1.0f, 1.0f);
+        uint sdrNits = uint(clamp(u_itmSdrNits, 0.0f, 9999.0f));
+        uint line1[10] = uint[10](CH_S, CH_D, CH_R, CH_SPC,
+            digit_char(sdrNits, 0u, 4u), digit_char(sdrNits, 1u, 4u),
+            digit_char(sdrNits, 2u, 4u), digit_char(sdrNits, 3u, 4u),
+            CH_SPC, CH_SPC);
+        ch = line1[col];
+    }
+    // Line 2: "TGT <nnnn>"  (u_itmTargetNits)
+    else if (row == 2u) {
+        textColor = vec4(1.0f, 0.9f, 0.4f, 1.0f);
+        uint tgtNits = uint(clamp(u_itmTargetNits, 0.0f, 9999.0f));
+        uint line2[10] = uint[10](CH_T, CH_G, CH_T, CH_SPC,
+            digit_char(tgtNits, 0u, 4u), digit_char(tgtNits, 1u, 4u),
+            digit_char(tgtNits, 2u, 4u), digit_char(tgtNits, 3u, 4u),
+            CH_SPC, CH_SPC);
+        ch = line2[col];
+    }
+    // Line 3: "EOTF PQ" or "EOTF G22"
+    else if (row == 3u) {
+        textColor = vec4(0.85f, 0.7f, 1.0f, 1.0f);
+        if (c_output_eotf == uint(EOTF_PQ)) {
+            const uint line3[10] = uint[10](CH_E, CH_O, CH_T, CH_F, CH_SPC, CH_P, CH_Q, CH_SPC, CH_SPC, CH_SPC);
+            ch = line3[col];
+        } else {
+            uint line3[10] = uint[10](CH_E, CH_O, CH_T, CH_F, CH_SPC, CH_G, CH_2, CH_2, CH_SPC, CH_SPC);
+            ch = line3[col];
+        }
+    }
+    // Line 4: "N <count>"  (layer count)
+    else if (row == 4u) {
+        textColor = vec4(0.7f, 0.7f, 0.7f, 1.0f);
+        uint layers = uint(c_layerCount);
+        uint line4[10] = uint[10](CH_L, CH_DASH, digit_char(layers, 0u, 1u), CH_SPC, CH_SPC, CH_SPC, CH_SPC, CH_SPC, CH_SPC, CH_SPC);
+        ch = line4[col];
+    }
+
+    if (font_pixel(ch, colX, rowY)) {
+        imageStore(dst, ivec2(coord), textColor);
+    } else {
+        imageStore(dst, ivec2(coord), bgColor);
     }
 }
 
